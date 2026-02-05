@@ -193,7 +193,9 @@ services:
 | ------------- | ------------------------------------ | -------- |
 | `PRIVATE_KEY` | Base58 Solana private key            | Yes      |
 | `RPC_URL`     | Solana RPC endpoint (for monitor)    | No       |
-| `USE_BINANCE_FEED` | `true` pakai Binance fair-price, `false` pakai 01 mid saja | No |
+| `REFERENCE_FEED` | Sumber fair price: `binance` / `coinbase` / `zo` | No |
+| `ENABLE_FEED_FAILOVER` | Auto fallback feed saat feed reference stale | No |
+| `USE_BINANCE_FEED` | Legacy flag (`false` = `REFERENCE_FEED=zo`) | No |
 | `REQUOTE_THRESHOLD_BPS` | Jangan replace order kalau beda harga masih <= ini | No |
 | `MIN_ORDER_AGE_MS` | Umur minimum order sebelum boleh diganti | No |
 | `LOG_LEVEL`   | Log level: debug, info, warn, error  | No       |

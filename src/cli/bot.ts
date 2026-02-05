@@ -12,6 +12,26 @@ function parseEnvNumber(name: string, fallback: number): number {
 	return Number.isFinite(parsed) ? parsed : fallback;
 }
 
+function parseReferenceFeed(): "binance" | "coinbase" | "zo" {
+	const raw = (process.env.REFERENCE_FEED ?? "").trim().toLowerCase();
+	if (raw === "coinbase") return "coinbase";
+	if (raw === "zo" || raw === "off" || raw === "none") return "zo";
+	if (raw === "binance") return "binance";
+
+	// Backward compatibility
+	const useBinance = (process.env.USE_BINANCE_FEED ?? "true").toLowerCase() !== "false";
+	return useBinance ? "binance" : "zo";
+}
+
+function parseEnvBoolean(name: string, fallback: boolean): boolean {
+	const raw = process.env[name];
+	if (!raw) return fallback;
+	const value = raw.trim().toLowerCase();
+	if (["1", "true", "yes", "on"].includes(value)) return true;
+	if (["0", "false", "no", "off"].includes(value)) return false;
+	return fallback;
+}
+
 function main(): void {
 	const symbol = process.argv[2]?.toUpperCase();
 
@@ -27,13 +47,17 @@ function main(): void {
 		process.exit(1);
 	}
 
-	const useBinanceFeed =
-		(process.env.USE_BINANCE_FEED ?? "true").toLowerCase() !== "false";
+	const referenceFeed = parseReferenceFeed();
 
 	const bot = new MarketMaker(
 		{
 			...DEFAULT_CONFIG,
-			useBinanceFeed,
+			referenceFeed,
+			useBinanceFeed: referenceFeed === "binance",
+			enableFeedFailover: parseEnvBoolean(
+				"ENABLE_FEED_FAILOVER",
+				DEFAULT_CONFIG.enableFeedFailover,
+			),
 			requoteThresholdBps: parseEnvNumber(
 				"REQUOTE_THRESHOLD_BPS",
 				DEFAULT_CONFIG.requoteThresholdBps,

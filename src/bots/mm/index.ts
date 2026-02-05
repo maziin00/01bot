@@ -5,6 +5,7 @@ import Decimal from "decimal.js";
 import type { DebouncedFunc } from "lodash-es";
 import { throttle } from "lodash-es";
 import { BinancePriceFeed } from "../../pricing/binance.js";
+import { CoinbasePriceFeed } from "../../pricing/coinbase.js";
 import {
 	FairPriceCalculator,
 	type FairPriceConfig,
@@ -54,13 +55,39 @@ function deriveBinanceSymbol(marketSymbol: string): string {
 	return `${baseSymbol}usdt`;
 }
 
+function deriveCoinbaseSymbol(marketSymbol: string): string {
+	const baseSymbol = marketSymbol
+		.replace(/-PERP$/i, "")
+		.replace(/USD$/i, "")
+		.toUpperCase();
+	return `${baseSymbol}-USD`;
+}
+
+interface ReferenceFeed {
+	connect(): void;
+	close(): void;
+	getMidPrice(): MidPrice | null;
+	onPrice: ((price: MidPrice) => void) | null;
+}
+
+type ReferenceFeedKind = "binance" | "coinbase" | "zo";
+
 export class MarketMaker {
 	private client: ZoClient | null = null;
 	private marketId = 0;
 	private marketSymbol = "";
 	private accountStream: AccountStream | null = null;
 	private orderbookStream: ZoOrderbookStream | null = null;
-	private binanceFeed: BinancePriceFeed | null = null;
+	private referenceFeed: ReferenceFeed | null = null;
+	private referenceFeedKind: ReferenceFeedKind = "zo";
+	private referenceFeedPriority: ReferenceFeedKind[] = ["zo"];
+	private referenceFeedIndex = 0;
+	private referenceFeedHealthInterval: ReturnType<typeof setInterval> | null = null;
+	private lastReferencePriceAt = 0;
+	private readonly referenceStaleMs = 20_000;
+	private readonly referenceHealthCheckMs = 5_000;
+	private binanceSymbol = "";
+	private coinbaseSymbol = "";
 	private fairPriceCalc: FairPriceProvider | null = null;
 	private positionTracker: PositionTracker | null = null;
 	private quoter: Quoter | null = null;
@@ -125,8 +152,12 @@ export class MarketMaker {
 		this.marketId = market.marketId;
 		this.marketSymbol = market.symbol;
 
-		const binanceSymbol = deriveBinanceSymbol(market.symbol);
-		this.logConfig(binanceSymbol);
+		this.binanceSymbol = deriveBinanceSymbol(market.symbol);
+		this.coinbaseSymbol = deriveCoinbaseSymbol(market.symbol);
+		this.referenceFeedPriority = this.buildReferenceFeedPriority();
+		this.referenceFeedIndex = 0;
+		this.applyReferenceFeed(this.referenceFeedPriority[0]);
+		this.logConfig(this.binanceSymbol, this.coinbaseSymbol);
 
 		// Initialize strategy components
 		const fairPriceConfig: FairPriceConfig = {
@@ -151,10 +182,6 @@ export class MarketMaker {
 		// Initialize streams
 		this.accountStream = new AccountStream(nord, accountId);
 		this.orderbookStream = new ZoOrderbookStream(nord, this.marketSymbol);
-		if (this.config.useBinanceFeed) {
-			this.binanceFeed = new BinancePriceFeed(binanceSymbol);
-		}
-
 		this.isRunning = true;
 	}
 
@@ -173,8 +200,8 @@ export class MarketMaker {
 		});
 
 		// Price feeds
-		if (this.binanceFeed) {
-			this.binanceFeed.onPrice = (price) => this.handleBinancePrice(price);
+		if (this.referenceFeed) {
+			this.referenceFeed.onPrice = (price) => this.handleReferencePrice(price);
 		}
 		if (this.orderbookStream) {
 			this.orderbookStream.onPrice = (price) => this.handleZoPrice(price);
@@ -183,25 +210,25 @@ export class MarketMaker {
 		// Start connections
 		this.accountStream?.connect();
 		this.orderbookStream?.connect();
-		if (this.config.useBinanceFeed) {
-			this.binanceFeed?.connect();
-		}
+		this.referenceFeed?.connect();
+		this.startReferenceHealthCheck();
 	}
 
-	private handleBinancePrice(binancePrice: MidPrice): void {
+	private handleReferencePrice(referencePrice: MidPrice): void {
+		this.lastReferencePriceAt = Date.now();
 		const zoPrice = this.orderbookStream?.getMidPrice();
 		if (
 			zoPrice &&
-			Math.abs(binancePrice.timestamp - zoPrice.timestamp) < 1000
+			Math.abs(referencePrice.timestamp - zoPrice.timestamp) < 1000
 		) {
-			this.fairPriceCalc?.addSample(zoPrice.mid, binancePrice.mid);
+			this.fairPriceCalc?.addSample(zoPrice.mid, referencePrice.mid);
 		}
 
 		if (!this.isRunning) return;
 
-		const fairPrice = this.fairPriceCalc?.getFairPrice(binancePrice.mid);
+		const fairPrice = this.fairPriceCalc?.getFairPrice(referencePrice.mid);
 		if (!fairPrice) {
-			this.logWarmupProgress(binancePrice);
+			this.logWarmupProgress(referencePrice);
 			return;
 		}
 
@@ -215,17 +242,17 @@ export class MarketMaker {
 	}
 
 	private handleZoPrice(zoPrice: MidPrice): void {
-		if (!this.config.useBinanceFeed) {
+		if (!this.referenceFeed) {
 			if (!this.isRunning) return;
 			if (!this.hasLoggedZoOnlyReady) {
 				this.hasLoggedZoOnlyReady = true;
-				log.info("Binance feed disabled. Using 01 mid price as fair price.");
+				log.info("External feed disabled. Using 01 mid price as fair price.");
 			}
 			this.throttledUpdate?.(zoPrice.mid);
 			return;
 		}
 
-		const binancePrice = this.binanceFeed?.getMidPrice();
+		const binancePrice = this.referenceFeed.getMidPrice();
 		if (
 			binancePrice &&
 			Math.abs(zoPrice.timestamp - binancePrice.timestamp) < 1000
@@ -307,8 +334,12 @@ export class MarketMaker {
 			clearInterval(this.orderSyncInterval);
 			this.orderSyncInterval = null;
 		}
+		if (this.referenceFeedHealthInterval) {
+			clearInterval(this.referenceFeedHealthInterval);
+			this.referenceFeedHealthInterval = null;
+		}
 
-		this.binanceFeed?.close();
+		this.referenceFeed?.close();
 		this.orderbookStream?.close();
 		this.accountStream?.close();
 
@@ -391,17 +422,87 @@ export class MarketMaker {
 		}
 	}
 
-	private logConfig(binanceSymbol: string): void {
+	private logConfig(binanceSymbol: string, coinbaseSymbol: string): void {
+		const feedLabel = this.referenceFeedLabel(binanceSymbol, coinbaseSymbol);
 		log.config({
 			Market: this.marketSymbol,
-			"Price Feed": this.config.useBinanceFeed
-				? `Binance (${binanceSymbol})`
-				: "01 mid only",
+			"Price Feed": feedLabel,
 			Spread: `${this.config.spreadBps} bps`,
 			"Take Profit": `${this.config.takeProfitBps} bps`,
 			"Order Size": `$${this.config.orderSizeUsd}`,
 			"Close Mode": `>=$${this.config.closeThresholdUsd}`,
 		});
+	}
+
+	private buildReferenceFeedPriority(): ReferenceFeedKind[] {
+		if (this.config.referenceFeed === "binance") {
+			return ["binance", "coinbase", "zo"];
+		}
+		if (this.config.referenceFeed === "coinbase") {
+			return ["coinbase", "binance", "zo"];
+		}
+		return ["zo"];
+	}
+
+	private createReferenceFeed(kind: ReferenceFeedKind): ReferenceFeed | null {
+		if (kind === "binance") {
+			return new BinancePriceFeed(this.binanceSymbol);
+		}
+		if (kind === "coinbase") {
+			return new CoinbasePriceFeed(this.coinbaseSymbol);
+		}
+		return null;
+	}
+
+	private applyReferenceFeed(kind: ReferenceFeedKind): void {
+		this.referenceFeed?.close();
+		this.referenceFeed = null;
+		this.referenceFeedKind = kind;
+		this.lastReferencePriceAt = 0;
+
+		const nextFeed = this.createReferenceFeed(kind);
+		if (!nextFeed) return;
+		nextFeed.onPrice = (price) => this.handleReferencePrice(price);
+		this.referenceFeed = nextFeed;
+	}
+
+	private startReferenceHealthCheck(): void {
+		if (this.referenceFeedHealthInterval || !this.config.enableFeedFailover) {
+			return;
+		}
+		this.referenceFeedHealthInterval = setInterval(() => {
+			if (!this.isRunning || !this.referenceFeed) {
+				return;
+			}
+			const sinceLastPrice = this.lastReferencePriceAt > 0
+				? Date.now() - this.lastReferencePriceAt
+				: Number.POSITIVE_INFINITY;
+			if (sinceLastPrice < this.referenceStaleMs) {
+				return;
+			}
+			if (this.referenceFeedIndex >= this.referenceFeedPriority.length - 1) {
+				return;
+			}
+
+			const previous = this.referenceFeedPriority[this.referenceFeedIndex];
+			this.referenceFeedIndex += 1;
+			const next = this.referenceFeedPriority[this.referenceFeedIndex];
+			log.warn(
+				`Reference feed stale (${previous}, ${Math.round(sinceLastPrice)}ms). Switching to ${next}.`,
+			);
+			this.applyReferenceFeed(next);
+			this.referenceFeed?.connect();
+		}, this.referenceHealthCheckMs);
+	}
+
+	private referenceFeedLabel(binanceSymbol: string, coinbaseSymbol: string): string {
+		if (this.config.referenceFeed === "binance") {
+			return `Binance (${binanceSymbol})`;
+		}
+		if (this.config.referenceFeed === "coinbase") {
+			return `Coinbase (${coinbaseSymbol})`;
+		}
+		return "01 mid only";
 	}
 
 	private async safeFetchInfo(user: NordUser): Promise<void> {
