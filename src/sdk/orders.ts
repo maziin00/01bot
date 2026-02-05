@@ -123,6 +123,26 @@ function buildPlaceAction(marketId: number, quote: Quote): UserAtomicSubaction {
 	return action;
 }
 
+interface PlaceOptions {
+	fillMode?: FillMode;
+	isReduceOnly?: boolean;
+}
+
+function buildPlaceActionWithOptions(
+	marketId: number,
+	quote: Quote,
+	options?: PlaceOptions,
+): UserAtomicSubaction {
+	const action = buildPlaceAction(marketId, quote);
+	if (options?.fillMode !== undefined) {
+		action.fillMode = options.fillMode;
+	}
+	if (options?.isReduceOnly !== undefined) {
+		action.isReduceOnly = options.isReduceOnly;
+	}
+	return action;
+}
+
 // Build cancel action from order ID
 function buildCancelAction(orderId: string): UserAtomicSubaction {
 	return {
@@ -146,6 +166,7 @@ export async function updateQuotes(
 	marketId: number,
 	currentOrders: CachedOrder[],
 	newQuotes: Quote[],
+	options?: PlaceOptions,
 ): Promise<CachedOrder[]> {
 	const keptOrders: CachedOrder[] = [];
 	const ordersToCancel: CachedOrder[] = [];
@@ -178,7 +199,9 @@ export async function updateQuotes(
 	// Build actions: cancels first, then places
 	const actions: UserAtomicSubaction[] = [
 		...ordersToCancel.map((o) => buildCancelAction(o.orderId)),
-		...quotesToPlace.map((q) => buildPlaceAction(marketId, q)),
+		...quotesToPlace.map((q) =>
+			buildPlaceActionWithOptions(marketId, q, options),
+		),
 	];
 
 	const placedOrders = await executeAtomic(user, actions);

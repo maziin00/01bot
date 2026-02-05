@@ -1,6 +1,6 @@
 // MarketMaker - main bot logic
 
-import type { NordUser } from "@n1xyz/nord-ts";
+import { FillMode, type NordUser } from "@n1xyz/nord-ts";
 import Decimal from "decimal.js";
 import type { DebouncedFunc } from "lodash-es";
 import { throttle } from "lodash-es";
@@ -79,10 +79,10 @@ export class MarketMaker {
 	private accountStream: AccountStream | null = null;
 	private orderbookStream: ZoOrderbookStream | null = null;
 	private referenceFeed: ReferenceFeed | null = null;
-	private referenceFeedKind: ReferenceFeedKind = "zo";
 	private referenceFeedPriority: ReferenceFeedKind[] = ["zo"];
 	private referenceFeedIndex = 0;
-	private referenceFeedHealthInterval: ReturnType<typeof setInterval> | null = null;
+	private referenceFeedHealthInterval: ReturnType<typeof setInterval> | null =
+		null;
 	private lastReferencePriceAt = 0;
 	private readonly referenceStaleMs = 20_000;
 	private readonly referenceHealthCheckMs = 5_000;
@@ -166,6 +166,7 @@ export class MarketMaker {
 		};
 		const positionConfig: PositionConfig = {
 			closeThresholdUsd: this.config.closeThresholdUsd,
+			takeProfitBps: this.config.takeProfitBps,
 			syncIntervalMs: this.config.positionSyncIntervalMs,
 		};
 
@@ -292,11 +293,8 @@ export class MarketMaker {
 		}
 
 		// Start position sync
-		this.positionTracker?.startSync(
-			user,
-			accountId,
-			this.marketId,
-			() => this.safeFetchInfo(user),
+		this.positionTracker?.startSync(user, accountId, this.marketId, () =>
+			this.safeFetchInfo(user),
 		);
 	}
 
@@ -386,15 +384,20 @@ export class MarketMaker {
 			const bbo = this.orderbookStream?.getBBO() ?? null;
 			const quotes = this.quoter.getQuotes(quotingCtx, bbo);
 			const stableQuotes = this.applyRequoteGuard(quotes);
+			const shouldCloseNow =
+				positionState.isCloseMode || positionState.takeProfitReady;
+			const closeQuotes = shouldCloseNow
+				? this.makeAggressiveCloseQuotes(stableQuotes, bbo)
+				: stableQuotes;
 
-			if (stableQuotes.length === 0) {
+			if (closeQuotes.length === 0) {
 				log.warn("No quotes generated (order size too small)");
 				return;
 			}
 
-			const bid = stableQuotes.find((q) => q.side === "bid");
-			const ask = stableQuotes.find((q) => q.side === "ask");
-			const isClose = positionState.isCloseMode;
+			const bid = closeQuotes.find((q) => q.side === "bid");
+			const ask = closeQuotes.find((q) => q.side === "ask");
+			const isClose = shouldCloseNow;
 			const spreadBps = isClose
 				? this.config.takeProfitBps
 				: this.config.spreadBps;
@@ -410,7 +413,10 @@ export class MarketMaker {
 				this.client.user,
 				this.marketId,
 				this.activeOrders,
-				stableQuotes,
+				closeQuotes,
+				shouldCloseNow
+					? { fillMode: FillMode.ImmediateOrCancel, isReduceOnly: true }
+					: { fillMode: FillMode.PostOnly, isReduceOnly: false },
 			);
 			this.activeOrders = newOrders;
 			this.refreshOrderAges(this.activeOrders);
@@ -457,7 +463,6 @@ export class MarketMaker {
 	private applyReferenceFeed(kind: ReferenceFeedKind): void {
 		this.referenceFeed?.close();
 		this.referenceFeed = null;
-		this.referenceFeedKind = kind;
 		this.lastReferencePriceAt = 0;
 
 		const nextFeed = this.createReferenceFeed(kind);
@@ -474,9 +479,10 @@ export class MarketMaker {
 			if (!this.isRunning || !this.referenceFeed) {
 				return;
 			}
-			const sinceLastPrice = this.lastReferencePriceAt > 0
-				? Date.now() - this.lastReferencePriceAt
-				: Number.POSITIVE_INFINITY;
+			const sinceLastPrice =
+				this.lastReferencePriceAt > 0
+					? Date.now() - this.lastReferencePriceAt
+					: Number.POSITIVE_INFINITY;
 			if (sinceLastPrice < this.referenceStaleMs) {
 				return;
 			}
@@ -495,7 +501,10 @@ export class MarketMaker {
 		}, this.referenceHealthCheckMs);
 	}
 
-	private referenceFeedLabel(binanceSymbol: string, coinbaseSymbol: string): string {
+	private referenceFeedLabel(
+		binanceSymbol: string,
+		coinbaseSymbol: string,
+	): string {
 		if (this.config.referenceFeed === "binance") {
 			return `Binance (${binanceSymbol})`;
 		}
@@ -591,6 +600,29 @@ export class MarketMaker {
 				};
 			}
 			return quote;
+		});
+	}
+
+	private makeAggressiveCloseQuotes(
+		quotes: Quote[],
+		bbo: { bestBid: number; bestAsk: number } | null,
+	): Quote[] {
+		if (!bbo) {
+			return quotes;
+		}
+		return quotes.map((quote) => {
+			if (quote.side === "ask") {
+				// For long close, cross to bid so IOC can execute immediately.
+				return {
+					...quote,
+					price: new Decimal(Math.min(quote.price.toNumber(), bbo.bestBid)),
+				};
+			}
+			// For short close, cross to ask so IOC can execute immediately.
+			return {
+				...quote,
+				price: new Decimal(Math.max(quote.price.toNumber(), bbo.bestAsk)),
+			};
 		});
 	}
 

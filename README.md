@@ -196,6 +196,10 @@ services:
 | `REFERENCE_FEED` | Sumber fair price: `binance` / `coinbase` / `zo` | No |
 | `ENABLE_FEED_FAILOVER` | Auto fallback feed saat feed reference stale | No |
 | `USE_BINANCE_FEED` | Legacy flag (`false` = `REFERENCE_FEED=zo`) | No |
+| `SPREAD_BPS` | Spread normal quote dalam bps | No |
+| `TAKE_PROFIT_BPS` | Trigger take-profit + close mode dalam bps | No |
+| `CLOSE_THRESHOLD_USD` | Trigger close mode saat nilai posisi >= ini | No |
+| `ORDER_SIZE_USD` | Ukuran order per quote (USD) | No |
 | `REQUOTE_THRESHOLD_BPS` | Jangan replace order kalau beda harga masih <= ini | No |
 | `MIN_ORDER_AGE_MS` | Umur minimum order sebelum boleh diganti | No |
 | `LOG_LEVEL`   | Log level: debug, info, warn, error  | No       |

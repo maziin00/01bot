@@ -8,6 +8,9 @@ export interface PositionState {
 	readonly sizeUsd: number;
 	readonly isLong: boolean;
 	readonly isCloseMode: boolean;
+	readonly entryPrice: number;
+	readonly unrealizedPnlUsd: number;
+	readonly takeProfitReady: boolean;
 }
 
 export interface QuotingContext {
@@ -18,11 +21,13 @@ export interface QuotingContext {
 
 export interface PositionConfig {
 	readonly closeThresholdUsd: number; // Trigger close mode when position >= this
+	readonly takeProfitBps: number; // Trigger close behavior when in profit by this bps
 	readonly syncIntervalMs: number;
 }
 
 export class PositionTracker {
 	private baseSize = 0;
+	private entryPrice = 0;
 	private isRunning = false;
 	private refreshUser: (() => Promise<void>) | null = null;
 
@@ -81,6 +86,7 @@ export class PositionTracker {
 					? pos.perp.baseSize
 					: -pos.perp.baseSize
 				: 0;
+			const serverEntryPrice = pos?.perp?.price ?? 0;
 
 			if (Math.abs(this.baseSize - serverSize) > 0.0001) {
 				log.warn(
@@ -88,6 +94,7 @@ export class PositionTracker {
 				);
 				this.baseSize = serverSize;
 			}
+			this.entryPrice = serverEntryPrice;
 		} catch (err) {
 			log.error("Position sync error:", err);
 		}
@@ -118,6 +125,14 @@ export class PositionTracker {
 		const sizeBase = this.baseSize;
 		const sizeUsd = sizeBase * fairPrice;
 		const isLong = sizeBase > 0;
+		const entryPrice = this.entryPrice;
+		const unrealizedPnlUsd =
+			entryPrice > 0 ? (fairPrice - entryPrice) * sizeBase : 0;
+		const takeProfitReady =
+			entryPrice > 0 && Math.abs(sizeBase) > 0
+				? Math.abs((fairPrice - entryPrice) / entryPrice) * 10000 >=
+						this.config.takeProfitBps && unrealizedPnlUsd > 0
+				: false;
 		const isCloseMode = Math.abs(sizeUsd) >= this.config.closeThresholdUsd;
 
 		return {
@@ -125,12 +140,15 @@ export class PositionTracker {
 			sizeUsd,
 			isLong,
 			isCloseMode,
+			entryPrice,
+			unrealizedPnlUsd,
+			takeProfitReady,
 		};
 	}
 
 	private getAllowedSides(state: PositionState): ("bid" | "ask")[] {
-		// Close mode: only allow reducing
-		if (state.isCloseMode) {
+		// Close mode or take-profit: only allow reducing
+		if (state.isCloseMode || state.takeProfitReady) {
 			return state.isLong ? ["ask"] : ["bid"];
 		}
 

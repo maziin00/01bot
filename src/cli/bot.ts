@@ -19,7 +19,8 @@ function parseReferenceFeed(): "binance" | "coinbase" | "zo" {
 	if (raw === "binance") return "binance";
 
 	// Backward compatibility
-	const useBinance = (process.env.USE_BINANCE_FEED ?? "true").toLowerCase() !== "false";
+	const useBinance =
+		(process.env.USE_BINANCE_FEED ?? "true").toLowerCase() !== "false";
 	return useBinance ? "binance" : "zo";
 }
 
@@ -53,10 +54,22 @@ function main(): void {
 		{
 			...DEFAULT_CONFIG,
 			referenceFeed,
-			useBinanceFeed: referenceFeed === "binance",
 			enableFeedFailover: parseEnvBoolean(
 				"ENABLE_FEED_FAILOVER",
 				DEFAULT_CONFIG.enableFeedFailover,
+			),
+			spreadBps: parseEnvNumber("SPREAD_BPS", DEFAULT_CONFIG.spreadBps),
+			takeProfitBps: parseEnvNumber(
+				"TAKE_PROFIT_BPS",
+				DEFAULT_CONFIG.takeProfitBps,
+			),
+			closeThresholdUsd: parseEnvNumber(
+				"CLOSE_THRESHOLD_USD",
+				DEFAULT_CONFIG.closeThresholdUsd,
+			),
+			orderSizeUsd: parseEnvNumber(
+				"ORDER_SIZE_USD",
+				DEFAULT_CONFIG.orderSizeUsd,
 			),
 			requoteThresholdBps: parseEnvNumber(
 				"REQUOTE_THRESHOLD_BPS",

@@ -2,7 +2,6 @@
 
 export interface MarketMakerConfig {
 	readonly symbol: string; // e.g., "BTC" or "ETH"
-	readonly useBinanceFeed: boolean; // Use Binance as reference feed
 	readonly referenceFeed: "binance" | "coinbase" | "zo"; // Reference feed source
 	readonly enableFeedFailover: boolean; // Auto-switch to fallback feed when stale
 	readonly spreadBps: number; // Spread from fair price (bps)
@@ -21,7 +20,6 @@ export interface MarketMakerConfig {
 
 // Default configuration values (symbol must be provided)
 export const DEFAULT_CONFIG: Omit<MarketMakerConfig, "symbol"> = {
-	useBinanceFeed: true,
 	referenceFeed: "binance",
 	enableFeedFailover: true,
 	spreadBps: 10,

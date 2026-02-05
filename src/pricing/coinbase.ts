@@ -27,17 +27,21 @@ export class CoinbasePriceFeed {
 
 	connect(): void {
 		if (this.ws) return;
-		log.info(`Connecting to Coinbase (${COINBASE_WS}) for ${this.productId}...`);
+		log.info(
+			`Connecting to Coinbase (${COINBASE_WS}) for ${this.productId}...`,
+		);
 		this.ws = new WebSocket(COINBASE_WS);
 
 		this.ws.on("open", () => {
 			log.info("Coinbase connected");
 			this.lastMessageTime = Date.now();
-			this.ws?.send(JSON.stringify({
-				type: "subscribe",
-				product_ids: [this.productId],
-				channel: "ticker"
-			}));
+			this.ws?.send(
+				JSON.stringify({
+					type: "subscribe",
+					product_ids: [this.productId],
+					channel: "ticker",
+				}),
+			);
 			this.startPingInterval();
 			this.startStaleCheck();
 		});
@@ -71,7 +75,14 @@ export class CoinbasePriceFeed {
 		try {
 			const msg = JSON.parse(raw) as {
 				channel?: string;
-				events?: Array<{ tickers?: Array<{ product_id?: string; best_bid?: string; best_ask?: string; price?: string }> }>;
+				events?: Array<{
+					tickers?: Array<{
+						product_id?: string;
+						best_bid?: string;
+						best_ask?: string;
+						price?: string;
+					}>;
+				}>;
 			};
 			if (msg.channel !== "ticker" || !msg.events?.length) return null;
 
@@ -85,7 +96,7 @@ export class CoinbasePriceFeed {
 						bid,
 						ask,
 						mid: (bid + ask) / 2,
-						timestamp: Date.now()
+						timestamp: Date.now(),
 					};
 				}
 			}
@@ -132,7 +143,9 @@ export class CoinbasePriceFeed {
 			const now = Date.now();
 			const timeSinceMessage = now - this.lastMessageTime;
 			if (this.lastMessageTime > 0 && timeSinceMessage > STALE_THRESHOLD_MS) {
-				log.warn(`Coinbase stale (${timeSinceMessage}ms since last message). Reconnecting...`);
+				log.warn(
+					`Coinbase stale (${timeSinceMessage}ms since last message). Reconnecting...`,
+				);
 				this.ws?.terminate();
 			}
 		}, STALE_CHECK_INTERVAL_MS);
